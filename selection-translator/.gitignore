@@ -1,0 +1,7 @@
+config.json
+translator.log
+venv/
+__pycache__/
+*.spec
+build/
+dist/
