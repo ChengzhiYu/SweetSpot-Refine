@@ -2,7 +2,7 @@
 SweetSpot Refine —— 全局划词翻译 / 润色工具
 ------------------------
 选中任意软件里的文本 -> 按快捷键 (默认 Ctrl+Alt+T) 或右键点击托盘图标选择菜单项
--> 自动复制选中内容 -> 调用大模型 (OpenAI / Gemini) -> 用返回结果替换选中文本
+-> 自动复制选中内容 -> 调用大模型 (Gemini) -> 用返回结果替换选中文本
 
 判断逻辑：
     文本以中文为主 -> 翻译成地道专业的英文
@@ -37,10 +37,6 @@ CONFIG_PATH = APP_DIR / "config.json"
 LOG_PATH = APP_DIR / "translator.log"
 
 DEFAULT_CONFIG = {
-    "provider": "openai",          # "openai" 或 "gemini"
-    "openai_api_key": "sk-在这里填写你的-openai-key",
-    "openai_base_url": "https://api.openai.com/v1",
-    "openai_model": "gpt-4o-mini",
     "gemini_api_key": "在这里填写你的-gemini-key",
     "gemini_model": "gemini-2.5-flash",
     "hotkey": "ctrl+alt+t",
@@ -121,25 +117,6 @@ def build_prompt(text: str):
     return system, text
 
 
-def call_openai(system: str, user: str) -> str:
-    from openai import OpenAI
-
-    client = OpenAI(
-        api_key=CFG["openai_api_key"],
-        base_url=CFG["openai_base_url"],
-    )
-    resp = client.chat.completions.create(
-        model=CFG["openai_model"],
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        temperature=0.3,
-        timeout=CFG["request_timeout"],
-    )
-    return resp.choices[0].message.content.strip()
-
-
 def call_gemini(system: str, user: str) -> str:
     import google.generativeai as genai
 
@@ -153,9 +130,7 @@ def call_gemini(system: str, user: str) -> str:
 
 def call_llm(text: str) -> str:
     system, user = build_prompt(text)
-    if CFG["provider"] == "gemini":
-        return call_gemini(system, user)
-    return call_openai(system, user)
+    return call_gemini(system, user)
 
 
 # ---------------------------------------------------------------------------
@@ -353,7 +328,7 @@ def run_tray():
 
 def main():
     keyboard.add_hotkey(CFG["hotkey"], trigger)
-    logging.info("服务已启动，快捷键：%s，provider：%s", CFG["hotkey"], CFG["provider"])
+    logging.info("服务已启动，快捷键：%s", CFG["hotkey"])
     run_tray()
 
 
