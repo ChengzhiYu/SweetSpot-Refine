@@ -1,5 +1,5 @@
 """
-SweetSpot Refine 图标：渐变圆角方块 + 白色四角星光（寓意“润色/点睛”）。
+SweetSpot 图标：渐变圆角方块 + 白色四角星光（寓意“润色/点睛”）。
 纯代码绘制，托盘图标和 exe 图标共用同一份图形。
 
 单独运行本文件会生成 app.ico（供 PyInstaller 打包使用）和 icon_preview.png。
