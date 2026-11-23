@@ -23,7 +23,6 @@ import pyperclip
 import keyboard
 import pystray
 from pystray import MenuItem as Item
-from PIL import Image, ImageDraw
 
 # ---------------------------------------------------------------------------
 # 路径处理：兼容直接运行 .py 和用 PyInstaller 打包成 .exe 两种情况
@@ -39,6 +38,10 @@ LOG_PATH = APP_DIR / "translator.log"
 DEFAULT_CONFIG = {
     "gemini_api_key": "在这里填写你的-gemini-key",
     "gemini_model": "gemini-2.5-flash",
+    # 主模型繁忙 (429/5xx) 重试仍失败时，依次改用这些模型
+    "gemini_fallback_models": ["gemini-2.5-flash", "gemini-2.5-flash-lite"],
+    # 每个模型遇到临时错误时的重试次数
+    "retry_count": 2,
     "hotkey": "ctrl+alt+t",
     "copy_wait": 0.15,
     "paste_wait": 0.10,
@@ -47,23 +50,28 @@ DEFAULT_CONFIG = {
 }
 
 
+def show_startup_message(message: str, *, error: bool = False) -> None:
+    icon = 0x10 if error else 0x40
+    ctypes.windll.user32.MessageBoxW(None, message, "SweetSpot Refine", icon)
+
+
 def load_config() -> dict:
     if not CONFIG_PATH.exists():
         CONFIG_PATH.write_text(
             json.dumps(DEFAULT_CONFIG, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        print(f"未找到配置文件，已在以下位置生成模板：\n{CONFIG_PATH}\n"
-              f"请填写 API Key 等信息后重新运行本程序。")
-        input("按回车键退出...")
+        show_startup_message(
+            f"未找到配置文件，已在以下位置生成模板：\n{CONFIG_PATH}\n"
+            "请填写 API Key 等信息后重新运行本程序。"
+        )
         sys.exit(0)
 
     cfg = DEFAULT_CONFIG.copy()
     try:
         cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
     except json.JSONDecodeError as e:
-        print(f"config.json 格式错误：{e}")
-        input("按回车键退出...")
+        show_startup_message(f"config.json 格式错误：{e}", error=True)
         sys.exit(1)
     return cfg
 
@@ -117,15 +125,87 @@ def build_prompt(text: str):
     return system, text
 
 
-def call_gemini(system: str, user: str) -> str:
-    import google.generativeai as genai
+GEMINI_ENDPOINT = (
+    "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+)
 
-    genai.configure(api_key=CFG["gemini_api_key"])
-    model = genai.GenerativeModel(CFG["gemini_model"], system_instruction=system)
-    resp = model.generate_content(
-        user, request_options={"timeout": CFG["request_timeout"]}
+
+RETRYABLE_HTTP_CODES = {429, 500, 502, 503, 504}
+
+
+class TransientError(RuntimeError):
+    """服务器繁忙 / 网络抖动等可重试的错误"""
+
+
+def call_gemini(system: str, user: str) -> str:
+    api_key = str(CFG["gemini_api_key"]).strip()
+    if not api_key or not api_key.isascii() or api_key == DEFAULT_CONFIG["gemini_api_key"]:
+        raise RuntimeError(f"请先在 {CONFIG_PATH} 中填写有效的 gemini_api_key")
+
+    models = [CFG["gemini_model"]]
+    for m in CFG.get("gemini_fallback_models") or []:
+        if m and m not in models:
+            models.append(m)
+    retries = max(int(CFG.get("retry_count", 2)), 0)
+
+    last_err = None
+    for model in models:
+        for attempt in range(retries + 1):
+            try:
+                result = _gemini_request(model, api_key, system, user)
+                if model != CFG["gemini_model"]:
+                    logging.info("主模型不可用，已改用 %s", model)
+                return result
+            except TransientError as e:
+                last_err = e
+                logging.warning("%s 第 %d 次请求失败：%s", model, attempt + 1, e)
+                if attempt < retries:
+                    time.sleep(1.5 * (attempt + 1))
+    raise last_err
+
+
+def _gemini_request(model: str, api_key: str, system: str, user: str) -> str:
+    # 直接调用 Gemini REST API（仅用标准库），避免 google-generativeai 引入
+    # grpc / cryptography 等原生依赖导致 PyInstaller 打包后 DLL 加载失败
+    import socket
+    import urllib.request
+    import urllib.error
+    from urllib.parse import quote
+
+    url = GEMINI_ENDPOINT.format(model=quote(model, safe=""))
+    body = json.dumps({
+        "system_instruction": {"parts": [{"text": system}]},
+        "contents": [{"role": "user", "parts": [{"text": user}]}],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": api_key,
+        },
     )
-    return resp.text.strip()
+    try:
+        with urllib.request.urlopen(req, timeout=CFG["request_timeout"]) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")
+        try:
+            detail = json.loads(detail)["error"]["message"]
+        except Exception:
+            pass
+        cls = TransientError if e.code in RETRYABLE_HTTP_CODES else RuntimeError
+        raise cls(f"Gemini HTTP {e.code} ({model}): {detail}") from None
+    except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError) as e:
+        raise TransientError(f"网络错误 ({model}): {e}") from None
+
+    candidates = data.get("candidates") or []
+    if not candidates:
+        reason = (data.get("promptFeedback") or {}).get("blockReason", "无候选结果")
+        raise RuntimeError(f"Gemini 未返回内容：{reason}")
+    parts = (candidates[0].get("content") or {}).get("parts") or []
+    return "".join(p.get("text", "") for p in parts).strip()
 
 
 def call_llm(text: str) -> str:
@@ -229,11 +309,8 @@ def trigger():
 # 系统托盘图标（右键菜单）
 # ---------------------------------------------------------------------------
 def make_icon_image():
-    img = Image.new("RGB", (64, 64), "white")
-    d = ImageDraw.Draw(img)
-    d.rectangle((4, 4, 60, 60), fill=(30, 144, 255))
-    d.text((22, 20), "T", fill="white")
-    return img
+    from icon_art import make_icon
+    return make_icon(64)
 
 
 def open_log(icon=None, item=None):
