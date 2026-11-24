@@ -1,5 +1,5 @@
 """
-划词浮动按钮：用鼠标拖选或双击选中文本后，在光标旁弹出一个小按钮，点击即触发润色 / 翻译。
+划词浮动按钮：用鼠标拖选或双击选中文本后，在光标旁弹出「翻译 | Refine」小按钮。
 
 实现要点
 - 用 WH_MOUSE_LL 低级鼠标钩子（ctypes，无额外依赖）识别“拖选”和“双击”手势。
@@ -100,8 +100,12 @@ COLOR_FG = "#3F3F46"
 COLOR_BUSY_FG = "#8B5CF6"
 COLOR_BORDER = "#E4E4E7"
 
-TEXT_IDLE = "Refine"
-TEXT_BUSY = "处理中…"
+# 浮动按钮上的两个动作：(动作名, 文字, 处理中文字)
+ACTIONS = (
+    ("translate", "翻译", "翻译中…"),
+    ("refine", "Refine", "处理中…"),
+)
+COLOR_DIVIDER = "#E4E4E7"
 
 CARD_TEXT_FG = "#18181B"
 CARD_MUTED_FG = "#71717A"
@@ -153,7 +157,8 @@ class SelectionPopup:
     def __init__(self, cfg: dict, on_activate, icon_factory):
         """
         cfg          : 全局配置 dict（读取 selection_popup / popup_timeout / popup_require_ibeam）
-        on_activate  : 点击按钮后在后台线程中调用的函数 f(anchor_rect)（复制 -> 调模型 -> 替换或展示）
+        on_activate  : 点击按钮后在后台线程中调用的函数 f(action, anchor_rect)，
+                       action 为 "translate"（翻译并展示）或 "refine"（润色并替换）
         icon_factory : size -> PIL.Image，按钮上的小图标
         """
         self.cfg = cfg
@@ -253,31 +258,39 @@ class SelectionPopup:
 
         box = self._box = tk.Frame(win, bg=COLOR_BG, highlightthickness=0, bd=0)
         box.pack(fill="both", expand=True)
-        inner = tk.Frame(box, bg=COLOR_BG)
+        font = ("Microsoft YaHei UI", 9, "bold")
+        pad_y = round(6 * s)
+
         self._img = ImageTk.PhotoImage(self.icon_factory(round(18 * s)), master=root)
-        self._icon_label = tk.Label(inner, image=self._img, bg=COLOR_BG, bd=0)
-        self._icon_label.pack(side="left", padx=(0, round(5 * s)))
-        self._text_label = tk.Label(
-            inner, text=TEXT_IDLE, font=("Segoe UI Semibold", 10), fg=COLOR_FG, bg=COLOR_BG, bd=0
-        )
-        self._text_label.pack(side="left")
-        self._inner = inner
+        self._icon_label = tk.Label(box, image=self._img, bg=COLOR_BG, bd=0)
+        self._icon_label.pack(side="left", padx=(round(8 * s), round(2 * s)), pady=pad_y)
 
-        # 固定按钮尺寸：取两种文字状态中较宽者，避免切换文字时窗口尺寸变化
-        widths = []
-        for text in (TEXT_BUSY, TEXT_IDLE):
-            self._text_label.configure(text=text)
-            inner.update_idletasks()
-            widths.append(inner.winfo_reqwidth())
-        pad_x, pad_y = round(10 * s), round(6 * s)
-        box.configure(width=max(widths) + 2 * pad_x, height=inner.winfo_reqheight() + 2 * pad_y)
-        box.pack_propagate(False)
-        inner.place(relx=0.5, rely=0.5, anchor="center")
+        # 每个动作一段；段宽取“正常文字”和“处理中文字”的较宽者，切换文字时尺寸不变
+        self._segments = {}
+        self._hover_action = None
+        probe = tk.Label(box, font=font)
+        for i, (action, text, busy_text) in enumerate(ACTIONS):
+            if i:
+                tk.Frame(box, bg=COLOR_DIVIDER, width=max(1, round(s)), height=round(16 * s)).pack(side="left")
+            widths = []
+            for t in (text, busy_text):
+                probe.configure(text=t)
+                probe.update_idletasks()
+                widths.append(probe.winfo_reqwidth())
+            seg = tk.Frame(box, bg=COLOR_BG, width=max(widths) + round(16 * s),
+                           height=probe.winfo_reqheight() + 2 * pad_y)
+            seg.pack(side="left")
+            seg.pack_propagate(False)
+            label = tk.Label(seg, text=text, font=font, fg=COLOR_FG, bg=COLOR_BG, bd=0)
+            label.place(relx=0.5, rely=0.5, anchor="center")
+            for w in (seg, label):
+                w.bind("<ButtonRelease-1>", lambda e, a=action: self._on_click(a))
+            self._segments[action] = (seg, label, text, busy_text)
+        probe.destroy()
+        tk.Frame(box, bg=COLOR_BG, width=round(4 * s)).pack(side="left")
 
-        for w in (win, box, inner, self._icon_label, self._text_label):
-            w.bind("<ButtonRelease-1>", self._on_click)
-        win.bind("<Enter>", lambda e: self._set_colors(hover=True))
-        win.bind("<Leave>", lambda e: self._set_colors(hover=self._cursor_inside()))
+        for seq in ("<Enter>", "<Leave>", "<Motion>"):
+            win.bind(seq, lambda e: self._update_hover())
 
         win.update_idletasks()
         win.update()
@@ -455,13 +468,37 @@ class SelectionPopup:
             pass
         self.root.after(15, self._poll)
 
-    def _set_colors(self, hover: bool):
-        bg = COLOR_HOVER if hover and self._state == "shown" else COLOR_BG
-        for w in (self.win, self._box, self._inner, self._icon_label, self._text_label):
-            w.configure(bg=bg)
+    def _segment_under_pointer(self):
+        # 窗口是用 SetWindowPos 直接移动的，Tk 记录的屏幕坐标不可靠；
+        # 这里用真实窗口位置 self._rect + 各段在窗口内的相对偏移来判断
+        r = self._rect
+        if r is None:
+            return None
+        pt = wintypes.POINT()
+        user32.GetCursorPos(ctypes.byref(pt))
+        if not self._point_inside(pt.x, pt.y):
+            return None
+        rel_x = pt.x - r[0]
+        for action, (seg, _, _, _) in self._segments.items():
+            if seg.winfo_x() <= rel_x < seg.winfo_x() + seg.winfo_width():
+                return action
+        return None
 
-    def _set_text(self, text: str, fg: str):
-        self._text_label.configure(text=text, fg=fg)
+    def _update_hover(self):
+        action = self._segment_under_pointer() if self._state == "shown" else None
+        if action == self._hover_action:
+            return
+        self._hover_action = action
+        for a, (seg, label, _, _) in self._segments.items():
+            bg = COLOR_HOVER if a == action else COLOR_BG
+            seg.configure(bg=bg)
+            label.configure(bg=bg)
+
+    def _reset_segments(self):
+        self._hover_action = None
+        for seg, label, text, _ in self._segments.values():
+            seg.configure(bg=COLOR_BG)
+            label.configure(bg=COLOR_BG, text=text, fg=COLOR_FG)
 
     def _cursor_inside(self) -> bool:
         pt = wintypes.POINT()
@@ -495,8 +532,7 @@ class SelectionPopup:
         )
         self._rect = (x, y, x + w, y + h)
         self._state = "shown"
-        self._set_text(TEXT_IDLE, COLOR_FG)
-        self._set_colors(hover=False)
+        self._reset_segments()
         self._cancel_hide_job()
         self._hide_job = self.root.after(int(float(self.cfg.get("popup_timeout", 4)) * 1000), self._auto_hide)
 
@@ -525,19 +561,20 @@ class SelectionPopup:
             return
         self._show_at(x, y)
 
-    def _on_click(self, _event=None):
-        if self._state != "shown" or not self._cursor_inside():
+    def _on_click(self, action: str):
+        if self._state != "shown" or self._segment_under_pointer() != action:
             return
         self._state = "busy"
         self._cancel_hide_job()
-        self._set_colors(hover=False)
-        self._set_text(TEXT_BUSY, COLOR_BUSY_FG)
+        self._reset_segments()
+        _, label, _, busy_text = self._segments[action]
+        label.configure(text=busy_text, fg=COLOR_BUSY_FG)
 
         anchor = self._rect
 
         def worker():
             try:
-                self.on_activate(anchor)
+                self.on_activate(action, anchor)
             except Exception:
                 logging.exception("浮动按钮触发失败")
             finally:
