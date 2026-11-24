@@ -3,7 +3,6 @@ translator.log
 venv/
 .venv/
 __pycache__/
-*.spec
 build/
 dist/
 icon_preview.png
