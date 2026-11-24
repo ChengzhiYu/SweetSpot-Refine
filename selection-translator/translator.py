@@ -68,16 +68,12 @@ def show_startup_message(message: str, *, error: bool = False) -> None:
 
 
 def load_config() -> dict:
+    # 第一次运行：生成默认配置，启动后会弹窗让用户填写 API Key
     if not CONFIG_PATH.exists():
         CONFIG_PATH.write_text(
             json.dumps(DEFAULT_CONFIG, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        show_startup_message(
-            f"未找到配置文件，已在以下位置生成模板：\n{CONFIG_PATH}\n"
-            "请填写 API Key 等信息后重新运行本程序。"
-        )
-        sys.exit(0)
 
     cfg = DEFAULT_CONFIG.copy()
     try:
@@ -177,10 +173,72 @@ class TransientError(RuntimeError):
     """服务器繁忙 / 网络抖动等可重试的错误"""
 
 
+def api_key_missing() -> bool:
+    key = str(CFG.get("gemini_api_key", "")).strip()
+    return not key or not key.isascii() or key == DEFAULT_CONFIG["gemini_api_key"]
+
+
+def check_api_key(key: str):
+    """
+    用一次轻量请求（列出模型）验证 key。
+    返回 (True, "") 有效；(False, 原因) 无效；(None, 原因) 网络等原因暂时无法验证
+    """
+    import urllib.request
+    import urllib.error
+
+    req = urllib.request.Request(
+        "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1",
+        headers={"x-goog-api-key": key},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=CFG["request_timeout"]):
+            return True, ""
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")
+        try:
+            detail = json.loads(detail)["error"]["message"]
+        except Exception:
+            pass
+        if e.code in (400, 401, 403):
+            return False, f"Google 拒绝了这个 key：{detail}"
+        return None, f"HTTP {e.code}: {detail}"
+    except Exception as e:
+        return None, str(e)
+
+
+def prompt_api_key(first_run: bool = False) -> bool:
+    """弹窗让用户输入 API Key，验证通过后保存。返回是否已保存新 key（阻塞调用线程）"""
+    from icon_art import make_icon
+    from key_dialog import ask_api_key
+
+    initial = "" if api_key_missing() else CFG["gemini_api_key"]
+    error = ""
+    while True:
+        key = _popup.run_sync(
+            lambda root: ask_api_key(root, make_icon, initial, error, first_run)
+        )
+        if not key:
+            return False
+        ok, reason = check_api_key(key)
+        if ok is False:
+            logging.warning("API Key 验证未通过：%s", reason)
+            initial, error = key, reason
+            continue
+        CFG["gemini_api_key"] = key
+        save_config()
+        if ok:
+            logging.info("API Key 已验证并保存")
+            notify("SweetSpot", "API Key 已保存，可以开始使用了")
+        else:
+            logging.warning("API Key 暂时无法验证（%s），已先保存", reason)
+            notify("SweetSpot", "API Key 已保存（暂时无法联网验证，请稍后试用）")
+        return True
+
+
 def call_gemini(system: str, user: str) -> str:
+    if api_key_missing():
+        raise RuntimeError("还没有设置 API Key：请右键托盘图标 →「设置 API Key…」")
     api_key = str(CFG["gemini_api_key"]).strip()
-    if not api_key or not api_key.isascii() or api_key == DEFAULT_CONFIG["gemini_api_key"]:
-        raise RuntimeError(f"请先在 {CONFIG_PATH} 中填写有效的 gemini_api_key")
 
     models = [CFG["gemini_model"]]
     for m in CFG.get("gemini_fallback_models") or []:
@@ -488,6 +546,10 @@ def change_hotkey(action: str):
     threading.Thread(target=worker, daemon=True).start()
 
 
+def set_api_key(icon=None, item=None):
+    threading.Thread(target=prompt_api_key, daemon=True).start()
+
+
 def toggle_selection_popup(icon=None, item=None):
     CFG["selection_popup"] = not CFG.get("selection_popup", True)
     save_config()
@@ -517,6 +579,7 @@ def run_tray():
             checked=lambda item: CFG.get("selection_popup", True),
         ),
         pystray.Menu.SEPARATOR,
+        Item("设置 API Key…", set_api_key),
         Item("打开配置文件 config.json", open_config),
         Item("查看日志", open_log),
         pystray.Menu.SEPARATOR,
@@ -541,6 +604,13 @@ def main():
     # 选中文字后开始打字，说明用户不需要按钮了
     # Esc 关闭翻译卡片
     keyboard.on_press(lambda e: _popup.on_key(e.name))
+
+    # 第一次运行（或 key 无效）：弹窗引导填写 API Key；用户选择“稍后再说”也照常启动
+    if api_key_missing() and not prompt_api_key(first_run=True):
+        show_startup_message(
+            "还没有设置 API Key，翻译和 Refine 暂时无法使用。\n"
+            "SweetSpot 会继续在托盘中运行，随时可以右键托盘图标 →「设置 API Key…」完成设置。"
+        )
 
     for action in ("translate", "refine"):
         try:

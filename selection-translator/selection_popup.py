@@ -218,27 +218,37 @@ class SelectionPopup:
         """浮动按钮当前所在位置，作为结果卡片的定位参考"""
         return self._rect
 
-    def ask_string(self, title: str, prompt: str, initialvalue: str = ""):
-        """在 UI 线程弹出输入框，阻塞调用线程直到用户关闭对话框"""
+    def run_sync(self, fn):
+        """在 UI 线程执行 fn(root)，阻塞调用线程并返回其结果（用于弹出对话框）"""
         result = {}
         done = threading.Event()
 
         def run():
-            from tkinter import simpledialog
-            top = self._tk.Toplevel(self.root)
-            top.withdraw()
-            top.attributes("-topmost", True)
             try:
-                result["value"] = simpledialog.askstring(
-                    title, prompt, initialvalue=initialvalue, parent=top
-                )
+                result["value"] = fn(self.root)
+            except Exception:
+                logging.exception("对话框执行失败")
             finally:
-                top.destroy()
                 done.set()
 
         self.call(run)
         done.wait()
         return result.get("value")
+
+    def ask_string(self, title: str, prompt: str, initialvalue: str = ""):
+        """在 UI 线程弹出输入框，阻塞调用线程直到用户关闭对话框"""
+
+        def run(root):
+            from tkinter import simpledialog
+            top = self._tk.Toplevel(root)
+            top.withdraw()
+            top.attributes("-topmost", True)
+            try:
+                return simpledialog.askstring(title, prompt, initialvalue=initialvalue, parent=top)
+            finally:
+                top.destroy()
+
+        return self.run_sync(run)
 
     # ------------------------------------------------------------------ UI 线程
     def _ui_thread(self):

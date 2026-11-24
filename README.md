@@ -16,13 +16,12 @@ Windows 上的全局划词翻译 / 润色小工具。在任意软件里选中一
 ## 快速开始（下载 exe）
 
 1. 到本仓库的 [Releases](../../releases) 页面下载最新的 `SweetSpot.exe`，**放进一个单独的文件夹**（配置文件和日志会生成在 exe 旁边）。
-2. 双击运行。第一次运行会在同一文件夹生成 `config.json`，并弹窗提示你填写 API Key。
-3. 申请 Gemini API Key：打开 [Google AI Studio](https://aistudio.google.com/apikey)，用 Google 账号登录，点 **Create API key**。有免费额度。
-4. 用记事本打开 `config.json`，把 `gemini_api_key` 的值换成你的 key，保存：
-   ```json
-   "gemini_api_key": "AIza...你的key...",
-   ```
-5. 再次双击 `SweetSpot.exe`。右下角托盘出现图标，就可以用了。
+2. 双击运行。第一次运行会弹出「欢迎使用 SweetSpot」窗口：
+   1. 点窗口里的「打开 Google AI Studio」，用 Google 账号登录，点 **Create API key**（有免费额度）；
+   2. 复制生成的 key，粘贴到窗口的输入框，点「保存」。
+3. 程序会自动验证 key：无效会提示原因并让你重新输入；有效就保存好，右下角托盘出现图标，可以开始用了。
+
+暂时没有 key 也可以点「稍后再说」，程序照常在托盘运行，之后随时右键托盘图标 →「设置 API Key…」完成设置。更换 key 也用这个菜单。key 保存在 exe 旁边自动生成的 `config.json` 里。
 
 想开机自动启动：按 `Win+R`，输入 `shell:startup` 回车，把 `SweetSpot.exe` 的**快捷方式**放进打开的文件夹。
 
@@ -32,7 +31,7 @@ Windows 上的全局划词翻译 / 润色小工具。在任意软件里选中一
 
 - **翻译**：选中文字 → 按 `Ctrl+Alt+W`，或点浮动按钮的「翻译」。结果卡片里可以点「复制」，或选中部分译文后按 `Ctrl+C`。点卡片外任意位置、点 ✕ 或按 `Esc` 关闭。
 - **Refine**：在输入框里选中文字 → 按 `Ctrl+Alt+T`，或点浮动按钮的「Refine」。几秒后选中的文字会被替换。替换不满意可以直接 `Ctrl+Z` 撤销。
-- **托盘菜单**（右键托盘图标）：手动触发两个动作、更改快捷键、开关浮动按钮、打开配置文件、查看日志、退出。
+- **托盘菜单**（右键托盘图标）：手动触发两个动作、更改快捷键、开关浮动按钮、设置 API Key、打开配置文件、查看日志、退出。
 
 ## 配置项（config.json）
 
@@ -40,7 +39,7 @@ Windows 上的全局划词翻译 / 润色小工具。在任意软件里选中一
 
 | 配置项 | 默认值 | 说明 |
 |---|---|---|
-| `gemini_api_key` | — | **必填**，你的 Gemini API Key |
+| `gemini_api_key` | — | **必填**，你的 Gemini API Key。推荐用托盘菜单「设置 API Key…」填写，会自动验证 |
 | `gemini_model` | `gemini-2.5-flash` | 使用的模型 |
 | `gemini_fallback_models` | `["gemini-2.5-flash", "gemini-2.5-flash-lite"]` | 主模型繁忙（HTTP 429 / 5xx）时依次改用的备用模型 |
 | `retry_count` | `2` | 每个模型遇到临时错误时的重试次数。设为 `0` 则立即改用备用模型 |
@@ -67,7 +66,7 @@ Windows 上的全局划词翻译 / 润色小工具。在任意软件里选中一
 
 **提示 `Gemini HTTP 503 ... high demand`**：Google 服务器繁忙，程序会自动重试并切换到备用模型。持续出现可以稍后再试，或把 `gemini_model` 换成其他模型。
 
-**提示 `API key not valid`**：检查 `config.json` 里的 key 是否完整复制，前后不要有空格。
+**提示 `API key not valid`**：key 没有完整复制，或已在 Google AI Studio 中被删除。右键托盘图标 →「设置 API Key…」重新粘贴。
 
 **其他问题**：托盘菜单 →「查看日志」，`translator.log` 里有每次请求的详细记录。
 
@@ -90,7 +89,7 @@ python -m venv .venv
 .\.venv\Scripts\python translator.py
 ```
 
-第一次运行会在 `selection-translator` 文件夹里生成 `config.json` 并退出，填好 `gemini_api_key` 后再运行一次即可。
+第一次运行会弹窗引导填写 API Key，配置保存在 `selection-translator\config.json`。
 
 ## 自己打包 exe
 
@@ -110,6 +109,7 @@ cd SweetSpot-Refine\selection-translator
 selection-translator/
 ├── translator.py        主程序：配置、调用 Gemini、快捷键、托盘菜单
 ├── selection_popup.py   划词浮动按钮和翻译结果卡片
+├── key_dialog.py        「设置 API Key」对话框
 ├── icon_art.py          用代码绘制的应用图标（生成 app.ico）
 ├── app.ico              exe 图标
 ├── SweetSpot.spec       PyInstaller 打包配置
