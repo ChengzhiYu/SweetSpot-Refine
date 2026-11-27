@@ -550,6 +550,28 @@ def set_api_key(icon=None, item=None):
     threading.Thread(target=prompt_api_key, daemon=True).start()
 
 
+def autostart_enabled() -> bool:
+    try:
+        import autostart
+        return autostart.is_enabled()
+    except Exception:
+        return False
+
+
+def toggle_autostart(icon=None, item=None):
+    import autostart
+    try:
+        if autostart.is_enabled():
+            autostart.disable()
+            notify("SweetSpot", "已关闭开机自动启动")
+        else:
+            autostart.enable()
+            notify("SweetSpot", "已开启开机自动启动")
+    except Exception as e:
+        logging.exception("设置开机自动启动失败")
+        notify("SweetSpot", f"设置开机自动启动失败：{e}")
+
+
 def toggle_selection_popup(icon=None, item=None):
     CFG["selection_popup"] = not CFG.get("selection_popup", True)
     save_config()
@@ -578,6 +600,7 @@ def run_tray():
             toggle_selection_popup,
             checked=lambda item: CFG.get("selection_popup", True),
         ),
+        Item("开机自动启动", toggle_autostart, checked=lambda item: autostart_enabled()),
         pystray.Menu.SEPARATOR,
         Item("设置 API Key…", set_api_key),
         Item("打开配置文件 config.json", open_config),
@@ -595,6 +618,14 @@ def main():
     from selection_popup import SelectionPopup, enable_dpi_awareness
 
     enable_dpi_awareness()  # 必须在创建任何窗口之前
+
+    # 开了自启动但 exe 被挪过位置：把启动项更新为当前路径
+    try:
+        import autostart
+        if autostart.refresh_path():
+            logging.info("开机自启动路径已更新为：%s", autostart.launch_command())
+    except Exception:
+        logging.exception("检查开机自启动路径失败")
     _popup = SelectionPopup(
         CFG,
         lambda action, anchor: run_action(action, from_hotkey=False, anchor=anchor),
